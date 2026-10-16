@@ -1,4 +1,4 @@
-# Spotify ELT Pipeline
+# Spotify ELT Pipeline - AWS Lambda, Eventbridge and Snowflake
 
 An automated ELT pipeline that extracts data from the Spotify Web API for 10 indie/rock artists, loads raw JSON into Snowflake, and transforms it through a medallion architecture (Bronze/Silver/Gold) using Dynamic Tables. The Gold layer feeds a Power BI dashboard via DirectQuery.
 
@@ -7,14 +7,14 @@ An automated ELT pipeline that extracts data from the Spotify Web API for 10 ind
 ## Pipeline Overview
 
 ```
-Spotify API  -->  AWS Lambda  -->  Snowflake (RAW -> Bronze -> Silver -> Gold)  -->  Power BI
+Spotify API  →  AWS Lambda  →  Snowflake (RAW → Bronze → Silver → Gold)  →  Power BI
 ```
 
-**Extract**: A Python Lambda function calls the Spotify API for each artist, fetching artist metadata, albums (paginated), and tracks per album (paginated). It handles rate limiting, incremental loading (skips albums already in Snowflake), and graceful timeout before the Lambda deadline.
+**Extract**: A Python Lambda function calls the Spotify API for each artist, fetching artist metadata, albums (paginated), and tracks per album (paginated). It handles rate limiting, incremental loading (skips albums already in Snowflake), and times out before the Lambda deadline.
 
 **Load**: The Lambda writes JSON arrays to Snowflake's internal stage via `PUT`, then runs `COPY INTO` targeting only the files just uploaded. `STRIP_OUTER_ARRAY` on the file format ensures each JSON object becomes one row.
 
-**Transform**: Eight Dynamic Tables handle all transformation with zero manual orchestration:
+**Transform**: Eight Dynamic Tables handle all transformation:
 
 | Layer | Table | Description |
 |-------|-------|-------------|
@@ -29,9 +29,18 @@ Spotify API  -->  AWS Lambda  -->  Snowflake (RAW -> Bronze -> Silver -> Gold)  
 
 Bronze and Silver use `TARGET_LAG = DOWNSTREAM` (only refresh when Gold needs them). Gold uses `TARGET_LAG = '1 hour'`.
 
-## Artists
+## 10 Artists
 
-Geese, Maruja, Fontaines D.C., Wednesday, Magdalena Bay, Black Country New Road, Big Thief, Wolf Alice, The Last Dinner Party, MJ Lenderman
+1. Geese
+2. Maruja
+3. Fontaines D.C.
+4. Wednesday
+5. Magdalena Bay
+6. Black Country New Road
+7. Big Thief
+8. Wolf Alice
+9. The Last Dinner Party
+10. MJ Lenderman
 
 ~2,200 tracks across ~550 albums/singles.
 
