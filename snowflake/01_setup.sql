@@ -1,0 +1,37 @@
+-- ============================================================
+-- Spotify ELT Pipeline - Setup
+-- Creates database, schemas, internal stage, file format,
+-- and raw landing tables.
+-- ============================================================
+
+CREATE DATABASE IF NOT EXISTS MUSIC_DB;
+
+CREATE SCHEMA IF NOT EXISTS MUSIC_DB.RAW;
+CREATE SCHEMA IF NOT EXISTS MUSIC_DB.BRONZE;
+CREATE SCHEMA IF NOT EXISTS MUSIC_DB.SILVER;
+CREATE SCHEMA IF NOT EXISTS MUSIC_DB.GOLD;
+
+-- Internal stage for JSON uploads from Lambda / local script
+CREATE STAGE IF NOT EXISTS MUSIC_DB.RAW.LB_INTERNAL_STAGE;
+
+-- JSON file format with STRIP_OUTER_ARRAY so each array element becomes a row
+CREATE OR REPLACE FILE FORMAT MUSIC_DB.RAW.JSON_FORMAT
+    TYPE = JSON
+    NULL_IF = ()
+    STRIP_OUTER_ARRAY = TRUE;
+
+-- Raw landing tables: store full JSON payloads as VARIANT
+CREATE TABLE IF NOT EXISTS MUSIC_DB.RAW.RAW_ARTISTS (
+    SRC VARIANT,
+    LOADED_AT TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE TABLE IF NOT EXISTS MUSIC_DB.RAW.RAW_RECORDINGS (
+    SRC VARIANT,
+    LOADED_AT TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE TABLE IF NOT EXISTS MUSIC_DB.RAW.RAW_RELEASES (
+    SRC VARIANT,
+    LOADED_AT TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP()
+);
