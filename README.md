@@ -1,4 +1,4 @@
-# Spotify ELT Pipeline - AWS Lambda, Eventbridge and Snowflake
+# Spotify ELT Pipeline - AWS, Snowflake
 
 An automated ELT pipeline that extracts data from the Spotify Web API for 10 indie/rock artists, loads raw JSON into Snowflake, and transforms it through a medallion architecture (Bronze/Silver/Gold) using Dynamic Tables. The Gold layer feeds a Power BI dashboard via DirectQuery.
 
@@ -10,7 +10,7 @@ An automated ELT pipeline that extracts data from the Spotify Web API for 10 ind
 Spotify API  →  AWS Lambda  →  Snowflake (RAW → Bronze → Silver → Gold)  →  Power BI
 ```
 
-**Extract**: A Python Lambda function calls the Spotify API for each artist, fetching artist metadata, albums (paginated), and tracks per album (paginated). It handles rate limiting, incremental loading (skips albums already in Snowflake), and times out before the Lambda deadline.
+**Extract**: A Python Lambda function calls the Spotify API for each artist, fetching paginated artist metadata, albums, and tracks. It handles the Spotify API's rate limiting, incremental loading (skips albums already in Snowflake), and times out before the Lambda deadline.
 
 **Load**: The Lambda writes JSON arrays to Snowflake's internal stage via `PUT`, then runs `COPY INTO` targeting only the files just uploaded. `STRIP_OUTER_ARRAY` on the file format ensures each JSON object becomes one row.
 
@@ -29,7 +29,7 @@ Spotify API  →  AWS Lambda  →  Snowflake (RAW → Bronze → Silver → Gold
 
 Bronze and Silver use `TARGET_LAG = DOWNSTREAM` (only refresh when Gold needs them). Gold uses `TARGET_LAG = '1 hour'`.
 
-## 10 Artists
+## Artists
 
 1. Geese
 2. Maruja
