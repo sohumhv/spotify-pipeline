@@ -134,6 +134,5 @@ spotify-pipeline/
 │   ├── 03_silver.sql
 │   └── 04_gold.sql
 └── docs/
-    ├── architecture.html
     └── architecture.png
 ```
