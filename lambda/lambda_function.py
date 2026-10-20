@@ -437,10 +437,16 @@ def get_album_state():
     conn = _connect()
     try:
         cur = conn.cursor()
+        # Incomplete albums (fewer loaded tracks than Spotify's total_tracks) go first
         cur.execute(f"""
-            SELECT ALBUM_ID,
-                   ROW_NUMBER() OVER (ORDER BY TRACKS_REFRESHED_AT NULLS FIRST) <= %s
-            FROM {db}.BRONZE.ALBUMS
+            SELECT a.ALBUM_ID,
+                   ROW_NUMBER() OVER (
+                       ORDER BY IFF(COUNT(t.TRACK_ID) < a.TOTAL_TRACKS, 0, 1),
+                                a.TRACKS_REFRESHED_AT NULLS FIRST
+                   ) <= %s
+            FROM {db}.BRONZE.ALBUMS a
+            LEFT JOIN {db}.BRONZE.TRACKS t ON t.ALBUM_ID = a.ALBUM_ID
+            GROUP BY a.ALBUM_ID, a.TOTAL_TRACKS, a.TRACKS_REFRESHED_AT
         """, (REFRESH_ALBUMS_PER_RUN,))
         rows = cur.fetchall()
         cur.close()
