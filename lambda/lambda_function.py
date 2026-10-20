@@ -1,9 +1,15 @@
 """
-Spotify Data Pipeline v3 - Lambda Function
+Spotify Data Pipeline v3 - Lambda Function (MERGE + metadata refresh)
 Fetches artist info, albums, and tracks (via albums) for a list of bands and
 writes them to Snowflake via snowflake-connector-python.
 
-Changes from v2:
+Changes in v3:
+  - RAW -> Bronze MERGE after every COPY: Bronze holds one current row per ID
+    (fixes duplicate artist rows that inflated Silver/Gold metrics)
+  - Rotating metadata refresh: each run also re-fetches tracks for the
+    REFRESH_ALBUMS_PER_RUN known albums with the oldest TRACKS_REFRESHED_AT
+
+Changes from v2 (carried forward):
   - _api fails fast on long rate limits (RateLimited) and never returns None
   - Album tracks are paginated (v2 silently truncated at 10)
   - Incremental: only fetches tracks / loads albums that are not already in Snowflake
@@ -50,6 +56,84 @@ REQUEST_SLEEP = 0.5       # seconds between API calls
 MAX_RETRY_AFTER = 30      # if Spotify asks for longer than this, abort the run
 SAFETY_MARGIN_S = 45      # stop fetching this many seconds before Lambda timeout
 LOCAL_TIME_BUDGET_S = 3600
+REFRESH_ALBUMS_PER_RUN = 25   # known albums whose tracks are re-fetched each run
+
+# Mirrors snowflake/05_merge.sql. Run after COPY with session variable SINCE set
+# to the run start, so only this run's RAW rows are merged.
+MERGE_SQL = """
+MERGE INTO {db}.BRONZE.ARTISTS t
+USING (
+    SELECT SRC:artist_id::VARCHAR artist_id, SRC:artist_name::VARCHAR artist_name, SRC:genres genres,
+           SRC:followers::INT followers, SRC:image_url::VARCHAR image_url, SRC:spotify_url::VARCHAR spotify_url,
+           LOADED_AT,
+           HASH(SRC:artist_name::VARCHAR, SRC:genres, SRC:followers::INT,
+                SRC:image_url::VARCHAR, SRC:spotify_url::VARCHAR) row_hash
+    FROM {db}.RAW.RAW_ARTISTS
+    WHERE LOADED_AT >= $SINCE::TIMESTAMP_LTZ AND SRC:artist_id IS NOT NULL
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY SRC:artist_id::VARCHAR ORDER BY LOADED_AT DESC) = 1
+) s ON t.ARTIST_ID = s.artist_id
+WHEN MATCHED AND t.ROW_HASH <> s.row_hash THEN UPDATE SET
+    ARTIST_NAME = s.artist_name, GENRES = s.genres, FOLLOWERS = s.followers, IMAGE_URL = s.image_url,
+    SPOTIFY_URL = s.spotify_url, ROW_HASH = s.row_hash, UPDATED_AT = s.LOADED_AT
+WHEN NOT MATCHED THEN INSERT
+    (ARTIST_ID, ARTIST_NAME, GENRES, FOLLOWERS, IMAGE_URL, SPOTIFY_URL, ROW_HASH, FIRST_SEEN_AT, UPDATED_AT)
+    VALUES (s.artist_id, s.artist_name, s.genres, s.followers, s.image_url, s.spotify_url,
+            s.row_hash, s.LOADED_AT, s.LOADED_AT);
+
+MERGE INTO {db}.BRONZE.ALBUMS t
+USING (
+    SELECT SRC:album_id::VARCHAR album_id, SRC:album_name::VARCHAR album_name, SRC:artist_id::VARCHAR artist_id,
+           SRC:artist_name::VARCHAR artist_name, SRC:album_type::VARCHAR album_type,
+           SRC:release_date::VARCHAR release_date, SRC:release_date_precision::VARCHAR release_date_precision,
+           SRC:total_tracks::INT total_tracks, SRC:image_url::VARCHAR image_url,
+           SRC:spotify_url::VARCHAR spotify_url, LOADED_AT,
+           HASH(SRC:album_name::VARCHAR, SRC:album_type::VARCHAR, SRC:release_date::VARCHAR,
+                SRC:total_tracks::INT, SRC:image_url::VARCHAR, SRC:spotify_url::VARCHAR) row_hash
+    FROM {db}.RAW.RAW_RELEASES
+    WHERE LOADED_AT >= $SINCE::TIMESTAMP_LTZ AND SRC:album_id IS NOT NULL
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY SRC:album_id::VARCHAR ORDER BY LOADED_AT DESC) = 1
+) s ON t.ALBUM_ID = s.album_id
+WHEN MATCHED THEN UPDATE SET
+    ALBUM_NAME = s.album_name, ARTIST_ID = s.artist_id, ARTIST_NAME = s.artist_name,
+    ALBUM_TYPE = s.album_type, RELEASE_DATE = s.release_date,
+    RELEASE_DATE_PRECISION = s.release_date_precision, TOTAL_TRACKS = s.total_tracks,
+    IMAGE_URL = s.image_url, SPOTIFY_URL = s.spotify_url, ROW_HASH = s.row_hash,
+    UPDATED_AT = IFF(t.ROW_HASH <> s.row_hash, s.LOADED_AT, t.UPDATED_AT),
+    TRACKS_REFRESHED_AT = s.LOADED_AT
+WHEN NOT MATCHED THEN INSERT
+    (ALBUM_ID, ALBUM_NAME, ARTIST_ID, ARTIST_NAME, ALBUM_TYPE, RELEASE_DATE, RELEASE_DATE_PRECISION,
+     TOTAL_TRACKS, IMAGE_URL, SPOTIFY_URL, ROW_HASH, FIRST_SEEN_AT, UPDATED_AT, TRACKS_REFRESHED_AT)
+    VALUES (s.album_id, s.album_name, s.artist_id, s.artist_name, s.album_type, s.release_date,
+            s.release_date_precision, s.total_tracks, s.image_url, s.spotify_url, s.row_hash,
+            s.LOADED_AT, s.LOADED_AT, s.LOADED_AT);
+
+MERGE INTO {db}.BRONZE.TRACKS t
+USING (
+    SELECT SRC:track_id::VARCHAR track_id, SRC:track_name::VARCHAR track_name, SRC:artist_id::VARCHAR artist_id,
+           SRC:artist_name::VARCHAR artist_name, SRC:album_id::VARCHAR album_id,
+           SRC:album_name::VARCHAR album_name, SRC:album_release_date::VARCHAR album_release_date,
+           SRC:duration_ms::INT duration_ms, SRC:explicit::BOOLEAN is_explicit,
+           SRC:track_number::INT track_number, SRC:disc_number::INT disc_number,
+           SRC:spotify_url::VARCHAR spotify_url, LOADED_AT,
+           HASH(SRC:track_name::VARCHAR, SRC:album_id::VARCHAR, SRC:album_name::VARCHAR,
+                SRC:album_release_date::VARCHAR, SRC:duration_ms::INT, SRC:explicit::BOOLEAN,
+                SRC:track_number::INT, SRC:disc_number::INT, SRC:spotify_url::VARCHAR) row_hash
+    FROM {db}.RAW.RAW_RECORDINGS
+    WHERE LOADED_AT >= $SINCE::TIMESTAMP_LTZ AND SRC:track_id IS NOT NULL
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY SRC:track_id::VARCHAR ORDER BY LOADED_AT DESC) = 1
+) s ON t.TRACK_ID = s.track_id
+WHEN MATCHED AND t.ROW_HASH <> s.row_hash THEN UPDATE SET
+    TRACK_NAME = s.track_name, ARTIST_ID = s.artist_id, ARTIST_NAME = s.artist_name,
+    ALBUM_ID = s.album_id, ALBUM_NAME = s.album_name, ALBUM_RELEASE_DATE = s.album_release_date,
+    DURATION_MS = s.duration_ms, IS_EXPLICIT = s.is_explicit, TRACK_NUMBER = s.track_number,
+    DISC_NUMBER = s.disc_number, SPOTIFY_URL = s.spotify_url, ROW_HASH = s.row_hash, UPDATED_AT = s.LOADED_AT
+WHEN NOT MATCHED THEN INSERT
+    (TRACK_ID, TRACK_NAME, ARTIST_ID, ARTIST_NAME, ALBUM_ID, ALBUM_NAME, ALBUM_RELEASE_DATE,
+     DURATION_MS, IS_EXPLICIT, TRACK_NUMBER, DISC_NUMBER, SPOTIFY_URL, ROW_HASH, FIRST_SEEN_AT, UPDATED_AT)
+    VALUES (s.track_id, s.track_name, s.artist_id, s.artist_name, s.album_id, s.album_name,
+            s.album_release_date, s.duration_ms, s.is_explicit, s.track_number, s.disc_number,
+            s.spotify_url, s.row_hash, s.LOADED_AT, s.LOADED_AT);
+"""
 
 # Keep v2 behavior of dropping albums that share a name (deluxe/remaster variants
 # with the same title, singles named like their album). Set False to keep them all.
@@ -239,11 +323,11 @@ def get_artist(token, name, artist_id):
     return artist
 
 
-def fetch_artist_data(token, name, artist_id, known_album_ids):
+def fetch_artist_data(token, name, artist_id, known_album_ids, refresh_album_ids):
     """
     Returns (artist_rec, tracks, albums).
-    Only albums NOT in known_album_ids are returned, and only if all of their
-    tracks were fetched successfully (so a failed album is retried next run).
+    Albums returned are new ones plus known ones queued for refresh, and only if
+    all of their tracks were fetched successfully (a failed album is retried next run).
     """
     artist = get_artist(token, name, artist_id)
     if not artist:
@@ -290,12 +374,14 @@ def fetch_artist_data(token, name, artist_id, known_album_ids):
             "spotify_url": alb.get("external_urls", {}).get("spotify"),
         })
 
-    new_albums_in = [a for a in candidate_albums if a["album_id"] not in known_album_ids]
-    print(f"  {len(candidate_albums)} albums on Spotify, {len(new_albums_in)} new")
+    new_albums = [a for a in candidate_albums if a["album_id"] not in known_album_ids]
+    refresh_albums = [a for a in candidate_albums if a["album_id"] in refresh_album_ids]
+    print(f"  {len(candidate_albums)} albums on Spotify, {len(new_albums)} new, "
+          f"{len(refresh_albums)} refreshing")
 
-    # --- Tracks for new albums only (paginated) ---
+    # --- Tracks for new + refresh-queued albums (paginated) ---
     tracks, albums = [], []
-    for alb in new_albums_in:
+    for alb in new_albums + refresh_albums:
         tracks_base = f"https://api.spotify.com/v1/albums/{alb['album_id']}/tracks?market=US"
         album_tracks = []
         try:
@@ -342,17 +428,25 @@ def _connect():
     )
 
 
-def get_known_album_ids():
-    """Album IDs already loaded into RAW_RELEASES."""
-    s = _get_secrets()
-    db, schema = s["SNOWFLAKE_DATABASE"], s["SNOWFLAKE_SCHEMA"]
+def get_album_state():
+    """
+    Returns (known_album_ids, refresh_album_ids) from BRONZE.ALBUMS.
+    The refresh set is the REFRESH_ALBUMS_PER_RUN albums refreshed longest ago.
+    """
+    db = _get_secrets()["SNOWFLAKE_DATABASE"]
     conn = _connect()
     try:
         cur = conn.cursor()
-        cur.execute(f"SELECT DISTINCT SRC:album_id::STRING FROM {db}.{schema}.RAW_RELEASES")
-        known = {row[0] for row in cur.fetchall() if row[0]}
+        cur.execute(f"""
+            SELECT ALBUM_ID,
+                   ROW_NUMBER() OVER (ORDER BY TRACKS_REFRESHED_AT NULLS FIRST) <= %s
+            FROM {db}.BRONZE.ALBUMS
+        """, (REFRESH_ALBUMS_PER_RUN,))
+        rows = cur.fetchall()
         cur.close()
-        return known
+        known = {r[0] for r in rows}
+        refresh = {r[0] for r in rows if r[1]}
+        return known, refresh
     finally:
         conn.close()
 
@@ -377,6 +471,8 @@ def upload_to_snowflake(all_artists, all_tracks, all_albums):
     conn = _connect()
     cur = conn.cursor()
     try:
+        # Rows loaded by this run have LOADED_AT >= SINCE; MERGE only touches those
+        cur.execute("SET SINCE = (SELECT CURRENT_TIMESTAMP()::VARCHAR)")
         with tempfile.TemporaryDirectory() as tmpdir:
             for filename, subdir, table, data in batches:
                 filepath = os.path.join(tmpdir, filename)
@@ -398,6 +494,9 @@ def upload_to_snowflake(all_artists, all_tracks, all_albums):
                 """)
                 print(f"COPY INTO {table}: {cur.fetchone()}")
 
+        for result in conn.execute_string(MERGE_SQL.format(db=db)):
+            print(f"MERGE: {result.fetchone()}")
+
         print(f"Loaded {len(all_artists)} artists, {len(all_tracks)} tracks, "
               f"{len(all_albums)} new albums into Snowflake")
     finally:
@@ -409,14 +508,15 @@ def upload_to_snowflake(all_artists, all_tracks, all_albums):
 # Orchestration
 # ============================================================
 
-def collect_data(token, known_album_ids):
+def collect_data(token, known_album_ids, refresh_album_ids=frozenset()):
     """Fetch every artist. Returns (artists, tracks, albums, errors)."""
     all_artists, all_tracks, all_albums, errors = [], [], [], []
 
     for name, artist_id in ARTISTS.items():
         print(f"Fetching {name}...")
         try:
-            artist, tracks, albums = fetch_artist_data(token, name, artist_id, known_album_ids)
+            artist, tracks, albums = fetch_artist_data(
+                token, name, artist_id, known_album_ids, refresh_album_ids)
         except StopRun as e:
             errors.append(f"{name}: {e}")
             print(f"  STOPPING: {e}")
@@ -443,16 +543,17 @@ def lambda_handler(event=None, context=None):
     """Lambda entry point: fetch Spotify data, upload to Snowflake."""
     _set_deadline(context)
 
-    known_album_ids = get_known_album_ids()
-    print(f"{len(known_album_ids)} albums already in Snowflake")
+    known_album_ids, refresh_album_ids = get_album_state()
+    print(f"{len(known_album_ids)} albums already in Snowflake, "
+          f"{len(refresh_album_ids)} queued for refresh")
 
     token = get_token()
-    artists, tracks, albums, errors = collect_data(token, known_album_ids)
+    artists, tracks, albums, errors = collect_data(token, known_album_ids, refresh_album_ids)
 
     # Load whatever completed successfully, even on partial failure
     upload_to_snowflake(artists, tracks, albums)
 
-    summary = f"Loaded {len(artists)} artists, {len(tracks)} tracks, {len(albums)} new albums"
+    summary = f"Loaded {len(artists)} artists, {len(tracks)} tracks, {len(albums)} albums (new + refreshed)"
     if errors:
         # Raise so Lambda reports a failure and CloudWatch alarms / retries fire
         raise RuntimeError(f"{summary}. Errors: {'; '.join(errors)}")
@@ -467,15 +568,16 @@ def run_local():
     secrets = _get_secrets()
     has_sf = bool(secrets.get("SNOWFLAKE_PASSWORD"))
 
-    known_album_ids = set()
+    known_album_ids, refresh_album_ids = set(), set()
     if has_sf:
-        known_album_ids = get_known_album_ids()
-        print(f"{len(known_album_ids)} albums already in Snowflake")
+        known_album_ids, refresh_album_ids = get_album_state()
+        print(f"{len(known_album_ids)} albums already in Snowflake, "
+              f"{len(refresh_album_ids)} queued for refresh")
     else:
         print("SNOWFLAKE_PASSWORD not set: treating all albums as new, skipping upload")
 
     token = get_token()
-    artists, tracks, albums, errors = collect_data(token, known_album_ids)
+    artists, tracks, albums, errors = collect_data(token, known_album_ids, refresh_album_ids)
 
     outdir = os.path.dirname(os.path.abspath(__file__))
     for name, data in [("artists", artists), ("tracks", tracks), ("albums", albums)]:

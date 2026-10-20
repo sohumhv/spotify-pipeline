@@ -21,11 +21,11 @@ AS
         ROUND(AVG(t.DURATION_MIN), 2)                                          AS AVG_TRACK_DURATION_MIN,
         ROUND(MIN(t.DURATION_MIN), 2)                                          AS MIN_TRACK_DURATION_MIN,
         ROUND(MAX(t.DURATION_MIN), 2)                                          AS MAX_TRACK_DURATION_MIN,
-        SUM(CASE WHEN t.IS_EXPLICIT THEN 1 ELSE 0 END)                        AS EXPLICIT_TRACK_COUNT,
+        COUNT_IF(t.IS_EXPLICIT)                                                AS EXPLICIT_TRACK_COUNT,
         MIN(t.RELEASE_YEAR)                                                    AS EARLIEST_RELEASE_YEAR,
         MAX(t.RELEASE_YEAR)                                                    AS LATEST_RELEASE_YEAR
     FROM MUSIC_DB.SILVER.DT_TRACKS_ENRICHED t
-    JOIN MUSIC_DB.BRONZE.DT_ARTISTS a
+    JOIN MUSIC_DB.BRONZE.ARTISTS a
         ON t.ARTIST_ID = a.ARTIST_ID
     GROUP BY t.ARTIST_ID, t.ARTIST_NAME, t.ARTIST_FOLLOWERS, a.IMAGE_URL;
 

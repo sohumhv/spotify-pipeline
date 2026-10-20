@@ -1,6 +1,7 @@
 -- ============================================================
 -- Spotify ELT Pipeline - Silver Layer
 -- Dynamic Tables that join Bronze tables and add derived columns.
+-- Bronze is one row per ID, so these joins cannot fan out.
 -- TARGET_LAG = DOWNSTREAM: only refresh when Gold needs them.
 -- ============================================================
 
@@ -30,10 +31,10 @@ AS
         t.SPOTIFY_URL,
         alb.ALBUM_TYPE,
         alb.TOTAL_TRACKS AS ALBUM_TOTAL_TRACKS
-    FROM MUSIC_DB.BRONZE.DT_TRACKS t
-    LEFT JOIN MUSIC_DB.BRONZE.DT_ARTISTS a
+    FROM MUSIC_DB.BRONZE.TRACKS t
+    LEFT JOIN MUSIC_DB.BRONZE.ARTISTS a
         ON t.ARTIST_ID = a.ARTIST_ID
-    LEFT JOIN MUSIC_DB.BRONZE.DT_ALBUMS alb
+    LEFT JOIN MUSIC_DB.BRONZE.ALBUMS alb
         ON t.ALBUM_ID = alb.ALBUM_ID;
 
 
@@ -55,6 +56,6 @@ AS
         alb.TOTAL_TRACKS,
         alb.IMAGE_URL,
         alb.SPOTIFY_URL
-    FROM MUSIC_DB.BRONZE.DT_ALBUMS alb
-    LEFT JOIN MUSIC_DB.BRONZE.DT_ARTISTS a
+    FROM MUSIC_DB.BRONZE.ALBUMS alb
+    LEFT JOIN MUSIC_DB.BRONZE.ARTISTS a
         ON alb.ARTIST_ID = a.ARTIST_ID;

@@ -1,59 +1,57 @@
 -- ============================================================
 -- Spotify ELT Pipeline - Bronze Layer
--- Dynamic Tables that parse raw JSON into typed columns.
--- TARGET_LAG = DOWNSTREAM: only refresh when Silver needs them.
+-- Current-state tables: one row per Spotify ID, maintained by MERGE
+-- (see 05_merge.sql). RAW stays append-only; Bronze is deduplicated.
+-- ROW_HASH lets MERGE skip unchanged rows so downstream refreshes stay small.
 -- ============================================================
 
-CREATE OR REPLACE DYNAMIC TABLE MUSIC_DB.BRONZE.DT_ARTISTS
-    TARGET_LAG = DOWNSTREAM
-    WAREHOUSE = COMPUTE_WH
-AS
-    SELECT
-        SRC:"artist_id"::VARCHAR    AS ARTIST_ID,
-        SRC:"artist_name"::VARCHAR  AS ARTIST_NAME,
-        SRC:"genres"::VARIANT       AS GENRES,
-        SRC:"followers"::INT        AS FOLLOWERS,
-        SRC:"image_url"::VARCHAR    AS IMAGE_URL,
-        SRC:"spotify_url"::VARCHAR  AS SPOTIFY_URL,
-        LOADED_AT
-    FROM MUSIC_DB.RAW.RAW_ARTISTS;
+CREATE TABLE IF NOT EXISTS MUSIC_DB.BRONZE.ARTISTS (
+    ARTIST_ID       VARCHAR PRIMARY KEY,
+    ARTIST_NAME     VARCHAR,
+    GENRES          VARIANT,
+    FOLLOWERS       INT,
+    IMAGE_URL       VARCHAR,
+    SPOTIFY_URL     VARCHAR,
+    ROW_HASH        NUMBER,
+    FIRST_SEEN_AT   TIMESTAMP_LTZ,
+    UPDATED_AT      TIMESTAMP_LTZ
+);
 
 
-CREATE OR REPLACE DYNAMIC TABLE MUSIC_DB.BRONZE.DT_ALBUMS
-    TARGET_LAG = DOWNSTREAM
-    WAREHOUSE = COMPUTE_WH
-AS
-    SELECT
-        SRC:"album_id"::VARCHAR              AS ALBUM_ID,
-        SRC:"album_name"::VARCHAR            AS ALBUM_NAME,
-        SRC:"artist_id"::VARCHAR             AS ARTIST_ID,
-        SRC:"artist_name"::VARCHAR           AS ARTIST_NAME,
-        SRC:"album_type"::VARCHAR            AS ALBUM_TYPE,
-        SRC:"release_date"::VARCHAR          AS RELEASE_DATE,
-        SRC:"release_date_precision"::VARCHAR AS RELEASE_DATE_PRECISION,
-        SRC:"total_tracks"::INT              AS TOTAL_TRACKS,
-        SRC:"image_url"::VARCHAR             AS IMAGE_URL,
-        SRC:"spotify_url"::VARCHAR           AS SPOTIFY_URL,
-        LOADED_AT
-    FROM MUSIC_DB.RAW.RAW_RELEASES;
+CREATE TABLE IF NOT EXISTS MUSIC_DB.BRONZE.ALBUMS (
+    ALBUM_ID                VARCHAR PRIMARY KEY,
+    ALBUM_NAME              VARCHAR,
+    ARTIST_ID               VARCHAR,
+    ARTIST_NAME             VARCHAR,
+    ALBUM_TYPE              VARCHAR,
+    RELEASE_DATE            VARCHAR,
+    RELEASE_DATE_PRECISION  VARCHAR,
+    TOTAL_TRACKS            INT,
+    IMAGE_URL               VARCHAR,
+    SPOTIFY_URL             VARCHAR,
+    ROW_HASH                NUMBER,
+    FIRST_SEEN_AT           TIMESTAMP_LTZ,
+    UPDATED_AT              TIMESTAMP_LTZ,
+    TRACKS_REFRESHED_AT     TIMESTAMP_LTZ   -- drives the Lambda's rotating track refresh
+);
 
 
-CREATE OR REPLACE DYNAMIC TABLE MUSIC_DB.BRONZE.DT_TRACKS
-    TARGET_LAG = DOWNSTREAM
-    WAREHOUSE = COMPUTE_WH
-AS
-    SELECT
-        SRC:"track_id"::VARCHAR           AS TRACK_ID,
-        SRC:"track_name"::VARCHAR         AS TRACK_NAME,
-        SRC:"artist_id"::VARCHAR          AS ARTIST_ID,
-        SRC:"artist_name"::VARCHAR        AS ARTIST_NAME,
-        SRC:"album_id"::VARCHAR           AS ALBUM_ID,
-        SRC:"album_name"::VARCHAR         AS ALBUM_NAME,
-        SRC:"album_release_date"::VARCHAR AS ALBUM_RELEASE_DATE,
-        SRC:"duration_ms"::INT            AS DURATION_MS,
-        SRC:"explicit"::BOOLEAN           AS IS_EXPLICIT,
-        SRC:"track_number"::INT           AS TRACK_NUMBER,
-        SRC:"disc_number"::INT            AS DISC_NUMBER,
-        SRC:"spotify_url"::VARCHAR        AS SPOTIFY_URL,
-        LOADED_AT
-    FROM MUSIC_DB.RAW.RAW_RECORDINGS;
+CREATE TABLE IF NOT EXISTS MUSIC_DB.BRONZE.TRACKS (
+    TRACK_ID            VARCHAR PRIMARY KEY,
+    TRACK_NAME          VARCHAR,
+    ARTIST_ID           VARCHAR,
+    ARTIST_NAME         VARCHAR,
+    ALBUM_ID            VARCHAR,
+    ALBUM_NAME          VARCHAR,
+    ALBUM_RELEASE_DATE  VARCHAR,
+    DURATION_MS         INT,
+    IS_EXPLICIT         BOOLEAN,
+    TRACK_NUMBER        INT,
+    DISC_NUMBER         INT,
+    SPOTIFY_URL         VARCHAR,
+    ROW_HASH            NUMBER,
+    FIRST_SEEN_AT       TIMESTAMP_LTZ,
+    UPDATED_AT          TIMESTAMP_LTZ
+);
+
+-- Backfill: run 05_merge.sql with SET SINCE = '1970-01-01'; to seed from all of RAW.
