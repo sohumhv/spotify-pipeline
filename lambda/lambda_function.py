@@ -116,7 +116,7 @@ def _get_secrets():
 
     secrets = {
         "SPOTIFY_CLIENT_ID": os.environ.get("SPOTIFY_CLIENT_ID", ""),
-        "SPOTIFY_CLIEwNT_SECRET": os.environ.get("SPOTIFY_CLIENT_SECRET", ""),
+        "SPOTIFY_CLIENT_SECRET": os.environ.get("SPOTIFY_CLIENT_SECRET", ""),
         "SNOWFLAKE_ACCOUNT": os.environ.get("SNOWFLAKE_ACCOUNT", ""),
         "SNOWFLAKE_USER": os.environ.get("SNOWFLAKE_USER", ""),
         "SNOWFLAKE_PASSWORD": os.environ.get("SNOWFLAKE_PASSWORD", ""),
