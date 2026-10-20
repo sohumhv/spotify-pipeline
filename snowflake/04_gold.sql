@@ -25,7 +25,7 @@ AS
         MIN(t.RELEASE_YEAR)                                                    AS EARLIEST_RELEASE_YEAR,
         MAX(t.RELEASE_YEAR)                                                    AS LATEST_RELEASE_YEAR
     FROM MUSIC_DB.SILVER.DT_TRACKS_ENRICHED t
-    JOIN MUSIC_DB.BRONZE.ARTISTS a
+    JOIN MUSIC_DB.BRONZE.DT_ARTISTS a
         ON t.ARTIST_ID = a.ARTIST_ID
     GROUP BY t.ARTIST_ID, t.ARTIST_NAME, t.ARTIST_FOLLOWERS, a.IMAGE_URL;
 

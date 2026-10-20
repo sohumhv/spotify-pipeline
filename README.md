@@ -6,36 +6,34 @@
 
 # Spotify ELT Pipeline - AWS, Snowflake
 
-An automated ELT pipeline that extracts data from the Spotify Web API for 10 indie/rock artists, loads raw JSON into Snowflake, MERGEs it into deduplicated Bronze tables, and transforms it through a medallion architecture (Bronze/Silver/Gold) using Dynamic Tables. The Gold layer feeds a Power BI dashboard via DirectQuery.
+An automated ELT pipeline that extracts data from the Spotify Web API for 10 indie/rock artists, loads raw JSON into Snowflake, and transforms it through a medallion architecture (Bronze/Silver/Gold) using Dynamic Tables. The Gold layer feeds a Power BI dashboard via DirectQuery.
 
 ![Architecture](docs/architecture.png)
 
 ## Pipeline Overview
 
 ```
-Spotify API  →  AWS Lambda  →  Snowflake (RAW → MERGE → Bronze → Silver → Gold)  →  Power BI
+Spotify API  →  AWS Lambda  →  Snowflake (RAW → Bronze → Silver → Gold)  →  Power BI
 ```
 
 **Extract**: A Python Lambda function calls the Spotify API for each artist, fetching paginated artist metadata, albums, and tracks. It handles the Spotify API's rate limiting, incremental loading (fetches tracks only for new albums), a rotating refresh of existing track metadata, and stops before the Lambda deadline.
 
-**Load**: The Lambda writes JSON arrays to Snowflake's internal stage via `PUT`, then runs `COPY INTO` targeting only the files just uploaded. `STRIP_OUTER_ARRAY` on the file format ensures each JSON object becomes one row. RAW is an append-only landing zone.
+**Load**: The Lambda writes JSON arrays to Snowflake's internal stage via `PUT`, then runs `COPY INTO` targeting only the files just uploaded. `STRIP_OUTER_ARRAY` on the file format ensures each JSON object becomes one row. RAW is an append-only landing zone that keeps every version of every record.
 
-**Merge**: In the same session, the Lambda runs `MERGE` from this run's RAW rows into Bronze. It keeps the newest row per Spotify ID and uses a `ROW_HASH` to skip unchanged rows, so Bronze always holds exactly one current row per artist, album, and track.
-
-**Transform**: Three MERGE-maintained Bronze tables and five Dynamic Tables:
+**Transform**: Eight Dynamic Tables handle all transformation inside Snowflake:
 
 | Layer | Table | Description |
 |-------|-------|-------------|
-| Bronze | `ARTISTS` | One row per artist: name, genres, followers, image URL |
-| Bronze | `ALBUMS` | One row per album: type, release date, track count, `TRACKS_REFRESHED_AT` |
-| Bronze | `TRACKS` | One row per track: name, duration, explicit flag |
+| Bronze | `DT_ARTISTS` | Parse artist JSON; newest row per artist ID |
+| Bronze | `DT_ALBUMS` | Parse album JSON; newest row per album ID |
+| Bronze | `DT_TRACKS` | Parse track JSON; newest row per track ID |
 | Silver | `DT_TRACKS_ENRICHED` | Join tracks + artists + albums; add `duration_display` (mm:ss), `release_year` |
 | Silver | `DT_ALBUMS_ENRICHED` | Join albums + artists; add `release_year` |
 | Gold | `DT_ARTIST_OVERVIEW` | Per-artist aggregates: track/album counts, duration stats, image URL |
 | Gold | `DT_TOP_TRACKS_RANKED` | All tracks with single-version tagging and per-artist ranking |
 | Gold | `DT_ALBUM_ANALYTICS` | All albums ranked by recency (overall and per-artist) |
 
-Silver uses `TARGET_LAG = DOWNSTREAM` (only refresh when Gold needs it). Gold uses `TARGET_LAG = '1 hour'`.
+Bronze and Silver use `TARGET_LAG = DOWNSTREAM` (only refresh when Gold needs them). Gold uses `TARGET_LAG = '1 hour'`.
 
 ## Artists
 
@@ -50,7 +48,7 @@ Silver uses `TARGET_LAG = DOWNSTREAM` (only refresh when Gold needs it). Gold us
 9. The Last Dinner Party
 10. MJ Lenderman
 
-~800 tracks across ~200 albums/singles.
+~930 tracks across ~200 albums/singles.
 
 ## Setup
 
@@ -64,10 +62,9 @@ snowsql -f snowflake/01_setup.sql
 snowsql -f snowflake/02_bronze.sql
 snowsql -f snowflake/03_silver.sql
 snowsql -f snowflake/04_gold.sql
-snowsql -f snowflake/05_merge.sql   # backfill Bronze from RAW (SINCE = 1970-01-01)
 ```
 
-This creates `MUSIC_DB` with four schemas, an internal stage, a JSON file format, three raw tables, three MERGE-maintained Bronze tables, and five Dynamic Tables.
+This creates `MUSIC_DB` with four schemas, an internal stage, a JSON file format, three raw tables, and eight Dynamic Tables.
 
 ### 2. Lambda Deployment
 
@@ -105,9 +102,9 @@ Local mode writes JSON backup files to disk and optionally uploads to Snowflake 
 ## Key Design Decisions
 
 - **Incremental loading**: Lambda reads known album IDs from Bronze before fetching. Only new albums (plus the refresh queue) have their tracks downloaded, which keeps API calls low.
-- **MERGE upserts**: RAW keeps every load for auditing; Bronze is upserted by ID. Re-loading an artist or album updates its row in place instead of adding a duplicate, so Silver joins can't fan out and the Gold counts stay accurate.
-- **Rotating metadata refresh**: Each run re-fetches tracks for the `REFRESH_ALBUMS_PER_RUN` (default 25) albums with the oldest `TRACKS_REFRESHED_AT`. Every album gets refreshed over a few runs without hitting rate limits or the timeout.
-- **Change detection**: `ROW_HASH` skips rows whose metadata didn't change, keeping writes and downstream refreshes small.
+- **Deduplicated Bronze**: RAW keeps every load for auditing. Each Bronze Dynamic Table keeps only the newest row per Spotify ID (`QUALIFY ROW_NUMBER()`), so re-loaded records update in place instead of duplicating, Silver joins can't fan out, and Gold counts stay accurate.
+- **Rotating metadata refresh**: Each run re-fetches tracks for `REFRESH_ALBUMS_PER_RUN` (default 25) known albums, incomplete ones first, then the least recently loaded. Existing track metadata stays current without hitting rate limits or the timeout.
+- **Pure ELT**: The Lambda only extracts and loads; every transformation runs in Snowflake.
 - **Album deduplication**: Spotify often returns multiple versions of the same album (deluxe, remaster). The Lambda deduplicates by album name per artist.
 - **Single version tagging**: The Gold layer detects tracks that exist on both an album and a single release, appending "(Single Version)" to the single's name for clarity in dashboards.
 - **Graceful timeout**: Lambda tracks remaining execution time and stops fetching before the deadline. Partially completed runs still upload what they have; the next run picks up the rest.
@@ -138,8 +135,7 @@ spotify-pipeline/
 │   ├── 01_setup.sql
 │   ├── 02_bronze.sql
 │   ├── 03_silver.sql
-│   ├── 04_gold.sql
-│   └── 05_merge.sql
+│   └── 04_gold.sql
 └── docs/
     └── architecture.png
 ```
